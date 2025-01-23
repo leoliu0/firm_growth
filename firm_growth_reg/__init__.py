@@ -1,37 +1,85 @@
-import pandas as pd
-import numpy as np
+import fileinput
 import os
-from init import rwrds, sedfile
-import statsmodels.api as sm
-from linearmodels.panel import PanelOLS
-from scipy.stats.mstats import winsorize
+import re
+import string
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-import string
+from typing import List
+import matplotlib.pyplot as plt
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
 from icecream import ic
+from linearmodels.panel import PanelOLS
+from loguru import logger
+from scipy.stats.mstats import winsorize
 
 pd.options.mode.use_inf_as_na = True
-from latex_table.latex_table import latex
 import warnings
+
+from latex_table import latex
 
 warnings.simplefilter("ignore")
 
 
-def ols(dataset, dep, ind, flag="i"):
+def read_str(file, encoding="latin1"):
+    with open(file, encoding=encoding) as f:
+        return f.read().splitlines()
+
+
+def sedfile(string, filename):
+    sta = string.split("/")
+    if len(sta) == 4:
+        _, input, output, oper = sta
+    elif len(sta) == 3:
+        _, input, oper = sta
+    else:
+        raise ValueError("cannot parse the input")
+
+    if oper == "g":
+        for line in fileinput.input(filename, inplace=1):
+            if re.search(input, line):
+                line = re.sub(input, output, line)
+            sys.stdout.write(line)
+    if oper == "d":
+        for line in fileinput.input(filename, inplace=1):
+            if re.search(input, line):
+                continue
+            sys.stdout.write(line)
+
+
+def debug(s):
+    logger.debug(s)
+
+
+def ols(dataset, dep, ind, flag="i", fe="industry"):
     final = dict()
     Xs = [f"theta_{flag}_" + q for q in ind]
     Xs.extend(["capital", "employment", "sig2", "lnat"])
     exog = sm.add_constant(dataset[Xs])
-    try:
-        mod = PanelOLS(
-            dataset[dep], exog, time_effects=True, other_effects=dataset["sic3"]
-        )
-        #     res = mod.fit(cov_type='clustered',cluster_entity=True,cluster_time=True)
-        res = mod.fit(cov_type="clustered", cluster_entity=True)
-    except:
-        print(dep, ind)
-        raise (ValueError)
-    return res.params, res.tstats, res.nobs
+    if fe == "industry":
+        try:
+            mod = PanelOLS(
+                dataset[dep], exog, time_effects=True, other_effects=dataset["sic3"]
+            )
+            #     res = mod.fit(cov_type='clustered',cluster_entity=True,cluster_time=True)
+            res = mod.fit(cov_type="clustered", cluster_entity=True)
+        except:
+            print(dep, ind)
+            raise (ValueError)
+
+    elif fe == "firm":
+        logger.info("estimating with Firm FE")
+        try:
+            mod = PanelOLS(dataset[dep], exog, time_effects=True, entity_effects=True)
+            #     res = mod.fit(cov_type='clustered',cluster_entity=True,cluster_time=True)
+            res = mod.fit(cov_type="clustered", cluster_entity=True)
+        except:
+            print(dep, ind)
+            raise (ValueError)
+    return res.params, res.tstats, res.std_errors, res.nobs, res.rsquared * 100
 
 
 def setIndex(df):
@@ -39,50 +87,114 @@ def setIndex(df):
 
 
 # def ols(dataset, dep, ind, flag="i"):
-def run_reg(df, Y, Xs, n, f):
+def run_reg(df, Y, Xs, n, f, fe):
     return ols(
         setIndex(df).dropna(subset=[Y + str(n), "capital", "employment", "sig2"]),
         Y + str(n),
         Xs,
         f,
+        fe,
     )
 
 
 class reg:
     def __init__(
         self,
-        df,
-        Xs,
-        year,
-        des,
-        name,
-        end_t=11,
-        Ys=["profits", "sale", "capital", "employment", "tfp"],
+        df: pd.core.frame.DataFrame,
+        Xs: List,
+        growth_df: pd.core.frame.DataFrame,
+        year_start: int = 1975,
+        year_end: int = 2020,
+        des: str = None,
+        name: str = "output",
+        end_t: int = 10,
+        Ys: List = ["profits", "sale", "capital", "employment", "tfp"],
+        r2: bool = False,
+        include_fin_util: bool = False,
+        dont_scale_by_at: List = [],
+        ctrl_y: bool = False,
+        ctrl_lag_y: bool = False,
+        ctrl_laglag_y: bool = False,
+        std_X: bool = False,
+        fe: str = "industry",
+        report_stat: str = "tvalues",
+        report_stars: bool = True,
+        bdec: int = 3,
+        tdec: int = 2,
+        sdec: int = 3,
     ):
-        assert len(df.groupby(["permno", "fyear"]).size()[lambda s: s > 1]) == 0
         self.df = df
         self.Xs = Xs
-        self.year = year
+        self.year_start = year_start
+        self.year_end = year_end
         self.des = Path(des)
         self.name = name
-        self.end_t = end_t
+        self.end_t = end_t + 1
         self.Ys = Ys
+        self.r2 = r2
+        self.include_fin_util = include_fin_util
+        self.dont_scale_by_at = dont_scale_by_at
+        self.ctrl_y = ctrl_y
+        self.ctrl_lag_y = ctrl_lag_y
+        self.ctrl_laglag_y = ctrl_laglag_y
+        self.std_X = std_X
+        self.fe = fe
+        self.report_stars = report_stars
+        self.report_stat = report_stat
+        self.bdec = bdec
+        self.tdec = tdec
+        self.sdec = sdec
 
-        growth = rwrds("select * from tfp_compustat")
-        growth = growth[
-            ~(
-                (growth.sic.isin(range(6000, 6800)))
-                | (growth.sic.isin(range(4900, 4950)))
-            )
+        growth = growth_df
+        assert (
+            len(growth.groupby(["gvkey", "fyear"]).permno.count()[lambda s: s > 1]) == 0
+        ), "not unique at gvkey,fyear"
+
+        # check if columns are all presented
+        growth[
+            [
+                "gvkey",
+                "fyear",
+                "permno",
+                "sic",
+                "at",
+                "sale",
+                "cogs",
+                "invt",
+                "ppegt",
+                "employment",
+                "capx",
+                "profits",
+                "output",
+                "capital",
+                "tfp",
+                "sig2",
+            ]
         ]
+
+        for col in ["gvkey", "permno", "fyear"]:
+            growth[col] = growth[col].astype(int)
+        if not self.include_fin_util:
+            growth = growth[
+                ~(
+                    (growth.sic.isin(range(6000, 6800)))
+                    | (growth.sic.isin(range(4900, 4950)))
+                )
+            ]
         growth["cogs"] = growth["cogs"] / growth["sale"]
         growth["lnat"] = np.log(growth["at"] + 1)
-        growth = growth[growth.fyear >= year]
         for c in [x for x in self.Ys if x != "tfp"]:
             growth.loc[growth[c].notnull(), c] = winsorize(
                 growth.loc[growth[c].notnull(), c], limits=0.01
             )
-        self.growth = growth[growth.fyear >= year]
+
+        debug(f"Before sample period restriction, dataframe for est is {len(growth)}")
+        self.growth = growth[lambda x: x.fyear >= self.year_start][
+            lambda x: x.fyear <= self.year_end
+        ]
+        debug(
+            f"After sample period restriction, dataframe for est is {len(self.growth)}"
+        )
 
         self.varname = {
             "profits": "Profits",
@@ -94,37 +206,35 @@ class reg:
             "q": "Q",
             "sale": "Sales",
             "lerner": "Lerner Index",
+            "at": "Asset",
         }
 
     def process_data(self):
-        Xs = ["xi"] + self.Xs
+        # Xs = ["xi"] + self.Xs
+        Xs = self.Xs
         self.df = self.growth.merge(self.df, how="left")
+        debug(f"Merge with X, the df.len is {len(self.df)}")
 
         for X in Xs:
             self.df[X].fillna(0, inplace=True)
         self.df["sic3"] = self.df["sic"] // 10
         self.df = self.df.dropna(subset=["sic3"])
-        # group_var = ["at"] + Xs
-        # group_xi = self.df.groupby(["sic3", "fyear"])[group_var]
-        #
-        # sum_xi = (
-        #     group_xi.sum()
-        #     .reset_index()
-        #     .merge(group_xi.size().reset_index(), on=["sic3", "fyear"])
-        #     .rename({0: "numfirms"}, axis=1)[lambda df: df.numfirms > 1]
-        # )
-        # sum_xi.columns = (
-        #     ["sic3", "fyear", "sum_at"] + [f"sum_{X}" for X in Xs] + ["numfirms"]
-        # )
-        # sum_xi = sum_xi[
-        #     sum_xi["sic3"].isin(
-        #         sum_xi.groupby("sic3")["sum_xi"].sum()[lambda s: s > 0].index
-        #     )
-        # ]
-        # self.df = self.df.merge(sum_xi, on=["sic3", "fyear"])
-        #
+        debug(f"After drop missing SIC3, the df.len is {len(self.df)}")
+
         for X in Xs:
+            if X in self.dont_scale_by_at:
+                debug(f"not scaling {X} by assets")
+                self.df[f"theta_i_{X}"] = self.df[X]
+                continue
             self.df[f"theta_i_{X}"] = self.df[X] / self.df["at"]
+
+        if self.std_X:
+            for X in Xs:
+                logger.info(f"standardizing theta_i_{X} to unit standard deviation")
+                self.df[f"theta_i_{X}"] = (
+                    self.df[f"theta_i_{X}"] / self.df[f"theta_i_{X}"].std()
+                )
+
             # self.df[f"theta_j_{X}"] = (self.df[f"sum_{X}"] - self.df[X]) / (
             #     self.df.sum_at - self.df["at"]
             # )
@@ -133,6 +243,32 @@ class reg:
             self.df[c] = np.log(self.df[c]).fillna(0)
 
         self.df = self.df.groupby(["gvkey", "fyear"]).mean().reset_index()
+        debug(f"After de-dup at gvkey,fyear, the df.len is {len(self.df)}")
+
+        if self.ctrl_lag_y:
+            debug("adding and controlling lagged Y")
+            df = self.df[
+                [
+                    "gvkey",
+                    "fyear",
+                ]
+                + self.Ys
+            ]
+
+            df = df.assign(fyear=df["fyear"] + 1)
+            df.columns = ["gvkey", "fyear"] + list(
+                map(lambda s: "theta_i_" + s + "l1", self.Ys)
+            )
+            self.df = self.df.merge(df, on=["gvkey", "fyear"])
+            debug(f"dataframe after having lagged Y is {len(self.df)}")
+
+            if self.ctrl_laglag_y:
+                debug("adding and controlling lag lag Y")
+                df = df.assign(fyear=df["fyear"] + 1)
+                df.columns = [x.replace("l1", "l2") for x in df.columns]
+                self.df = self.df.merge(df, on=["gvkey", "fyear"])
+                debug(f"dataframe after having lag lag Y is {len(self.df)}")
+
         for tau in range(1, self.end_t):
             df = self.df[
                 [
@@ -149,15 +285,34 @@ class reg:
             for c, d in zip(self.Ys, list(map(lambda s: s + str(tau), self.Ys))):
                 self.df[d] = self.df[d] - self.df[c]
 
+        for Y in self.Ys:
+            self.df["theta_i_" + Y] = self.df[Y]
+
     def estimate(self):
         all_tables = []
         self.process_data()
 
-        _table_i, _table_j, b, t = latex(), latex(), dict(), dict()
+        _table_i, _table_j, b, stats = (
+            latex(bdec=self.bdec, tdec=self.tdec, sdec=self.sdec),
+            latex(),
+            dict(),
+            dict(),
+        )
         for panel, Y in zip(list(string.ascii_uppercase[: len(self.Ys)]), self.Ys):
+            ctrl_y = []
+            if self.ctrl_y and Y not in ["employment", "capital"]:
+                ctrl_y.append(Y)
+            if self.ctrl_lag_y:
+                ctrl_y.append(f"{Y}l1")
+            if self.ctrl_laglag_y:
+                ctrl_y.append(f"{Y}l2")
             noobs = ["Obs."]
+            r2s = ["$R^2 (\%)$"]
             for X in self.Xs:
-                b[X], t[X], = (
+                (
+                    b[X],
+                    stats[X],
+                ) = (
                     [X],
                     [""],
                 )
@@ -165,67 +320,46 @@ class reg:
             with ProcessPoolExecutor(10) as p:
                 result = []
                 for time in range(1, self.end_t):
-                    result.append(p.submit(run_reg, self.df, Y, self.Xs, time, "i"))
+                    result.append(
+                        p.submit(
+                            run_reg, self.df, Y, ctrl_y + self.Xs, time, "i", self.fe
+                        )
+                    )
                 for res in result:
-                    params, tstats, nobs = res.result()
+                    params, tstats, bse, nobs, r2 = res.result()
                     for X in self.Xs:
                         b[X].append(params.loc[f"theta_i_{X}"])
-                        t[X].append(tstats[f"theta_i_{X}"])
+                        if self.report_stat == "tvalues":
+                            stats[X].append(tstats[f"theta_i_{X}"])
+                        elif self.report_stat == "bse":
+                            stats[X].append(bse[f"theta_i_{X}"])
 
                     noobs.append(nobs)
+                    r2s.append(r2)
             _table_i.write_plain_row(
                 "\multicolumn{%d}{c}{\\textit{Panel %s. %s}}"
                 % (self.end_t * 2 - 2, panel, self.varname[Y])
             )
             _table_i.hline()
             for X in self.Xs:
-                _table_i.collect_beta_t(zip(b[X], t[X]))
+                _table_i.collect_beta_t(
+                    zip(b[X], stats[X]),
+                    se=self.report_stat == "bse",
+                    stars=self.report_stars,
+                )
+            if self.r2:
+                _table_i.collect_row(r2s, rounding=2)
+            _table_i.write_empty_row()
             _table_i.collect_row(noobs)
             _table_i.hline()
             _table_i.write_empty_row()
 
-        the_table = self.des / f"firm_growth_i_{self.year}_{self.name}.tex"
-        # the_table = des/f'firm_growth_i_{year}_level.tex'
+        the_table = self.des / f"firm_growth_i_{self.year_start}_{self.name}.tex"
+        self.table_name = the_table.as_posix()
+        _table_i.rows = _table_i.rows[:-1]
+        logger.info(f"writing table {self.table_name}")
         _table_i.write_table(the_table, "w")
         all_tables.append(the_table)
-
-        # def run_reg(n):
-        #     return self.ols(
-        #         self.setIndex(self.df).dropna(
-        #             subset=[Y + str(n), "capital", "employment", "sig2"]
-        #         ),
-        #         Y + str(n),
-        #         self.Xs,
-        #         f="j",
-        #     )
-        #
-        # for panel, Y in zip(list(string.ascii_uppercase[: len(self.Ys)]), self.Ys):
-        #     noobs = ["Obs."]
-        #     for X in self.Xs:
-        #         b[X], t[X], = (
-        #             [X],
-        #             [""],
-        #         )
-        #     with Pool() as p:
-        #         for params, tstats, nobs in p.submit(run_reg, range(1, self.end_t)):
-        #             for X in self.Xs:
-        #                 b[X].append(params.loc[f"theta_j_{X}"])
-        #                 t[X].append(tstats[f"theta_j_{X}"])
-        #
-        #             noobs.append(nobs)
-        #     _table_j.write_plain_row(
-        #         "\multicolumn{%d}{c}{\\textit{Panel %s. %s}}"
-        #         % (end_t * 2 - 2, panel, varname[Y])
-        #     )
-        #     _table_j.hline()
-        #     for X in self.Xs:
-        #         _table_j.collect_beta_t(zip(b[X], t[X]))
-        #     _table_j.collect_row(noobs)
-        #     _table_j.hline()
-        #
-        # the_table = self.des / f"firm_growth_j_{self.year}_{self.name}.tex"
-        # _table_j.write_table(the_table, "w")
-        # all_tables.append(the_table)
 
         for t in all_tables:
             sedfile(r"s/_/\\_/g", t)
@@ -233,5 +367,102 @@ class reg:
             sedfile(r"s/\\$/\\\\/g", t)
             sedfile(r"s/\\ $/\\\\/g", t)
 
-        for t in all_tables:
-            os.system(f"fixtable -i --nostata {t} -v var.txt")
+    def plotter(
+        self,
+        ax: plt.Axes,
+        var: List[float],
+        var_t: List[float],
+        legend: str,
+        color: str,
+        error_bars: bool,
+    ) -> plt.Axes:
+        time_intervals = list(range(1, self.end_t))
+
+        estimates = list(map(float, var))
+        std_errors = [
+            est / abs(float(t_val) + 0.01) for est, t_val in zip(estimates, var_t)
+        ]
+        lower_bounds = [est - 1.96 * se for est, se in zip(estimates, std_errors)]
+        upper_bounds = [est + 1.96 * se for est, se in zip(estimates, std_errors)]
+
+        ax.plot(
+            time_intervals,
+            estimates,
+            marker="o",
+            linestyle="-",
+            label=legend,
+            color=color,
+        )
+        if error_bars:
+            ax.plot(
+                time_intervals,
+                lower_bounds,
+                linestyle="--",
+                color=color,
+                alpha=0.6,
+            )
+            ax.plot(
+                time_intervals,
+                upper_bounds,
+                linestyle="--",
+                color=color,
+                alpha=0.6,
+            )
+        # ax.fill_between(
+        #     time_intervals, lower_bounds, upper_bounds, color=color, alpha=0.2
+        # )
+
+        ax.set_xticks(time_intervals)
+        ax.set_xticklabels([f"t+{i}" for i in time_intervals])
+
+        ax.set_xlabel("")
+        ax.set_ylabel("Beta")
+        ax.legend(facecolor="white")
+        ax.set_facecolor("white")
+        ax.grid(True, color="lightgrey")
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.spines["bottom"].set_visible(False)
+
+    def plot_beta(
+        self,
+        exclude: List[str] = [],
+        error_bars: bool = True,
+        colors=[
+            "tab:blue",
+            "tab:orange",
+            "tab:green",
+            "tab:red",
+            "tab:purple",
+            "tab:brown",
+            "tab:pink",
+            "tab:gray",
+            "tab:olive",
+            "tab:cyan",
+        ],
+    ):
+        tb = read_str(self.table_name)
+        varname, coef, tstat = [], [], []
+
+        for i, x in enumerate(tb):
+            if x.startswith("&"):
+                tstat.append(re.findall(r"\d\.\d+", x))
+                row = tb[i - 1]
+                varname.append(row.split("&")[0].strip())
+                coef.append(re.findall(r"\d\.\d+", row))
+
+        N = 0
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for v, co, t, color in zip(varname, coef, tstat, colors[: len(self.Xs)] * 10):
+            N += 1
+            if not any(ex.lower() in v.lower() for ex in exclude):
+                self.plotter(ax, co, t, v, color, error_bars)
+
+            if N % len(self.Xs) == 0:
+                outfile = f"{self.table_name.split('.tex')[0]}_{self.Ys[(N // len(self.Xs))-1]}.png"
+                # ax.title.set_text(f"{self.Ys[(N // len(self.Xs))-1]}")
+                fig.savefig(outfile, bbox_inches="tight")
+                print(f"Saved plot to {outfile}")
+                fig, ax = plt.subplots(figsize=(8, 6))
