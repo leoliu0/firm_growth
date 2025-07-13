@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 import fileinput
 import os
 import re
@@ -16,7 +17,6 @@ from linearmodels.panel import PanelOLS
 from loguru import logger
 from scipy.stats.mstats import winsorize
 
-pd.options.mode.use_inf_as_na = True
 import warnings
 
 from latex_table import latex
@@ -27,6 +27,18 @@ warnings.simplefilter("ignore")
 def read_str(file, encoding="latin1"):
     with open(file, encoding=encoding) as f:
         return f.read().splitlines()
+
+
+def star(p):
+    p = abs(p)
+    stars = ""
+    if p < 0.1:
+        stars = "*"
+    if p <= 0.05:
+        stars = "**"
+    if p <= 0.01:
+        stars = "***"
+    return stars
 
 
 def sedfile(string, filename):
@@ -54,10 +66,14 @@ def debug(s):
     logger.debug(s)
 
 
-def ols(dataset, dep, ind, flag="i", fe="industry"):
+def setIndex(df):
+    return df.set_index(["gvkey", "fyear"])
+
+
+def ols(dataset, dep, ind, more_ctrl, flag="i", fe="industry"):
     final = dict()
     Xs = [f"theta_{flag}_" + q for q in ind]
-    Xs.extend(["capital", "employment", "sig2", "lnat"])
+    Xs.extend(["capital", "employment", "sig2", "lnat"] + more_ctrl)
     exog = sm.add_constant(dataset[Xs])
     if fe == "industry":
         try:
@@ -79,73 +95,52 @@ def ols(dataset, dep, ind, flag="i", fe="industry"):
         except:
             print(dep, ind)
             raise (ValueError)
-    return res.params, res.tstats, res.std_errors, res.nobs, res.rsquared * 100
+    return mod, res
 
 
-def setIndex(df):
-    return df.set_index(["gvkey", "fyear"])
-
-
-# def ols(dataset, dep, ind, flag="i"):
-def run_reg(df, Y, Xs, n, f, fe):
+def run_reg(df, Y, Xs, more_ctrl, n, f, fe):
     return ols(
         setIndex(df).dropna(subset=[Y + str(n), "capital", "employment", "sig2"]),
         Y + str(n),
         Xs,
+        more_ctrl,
         f,
         fe,
     )
 
 
+@dataclass
 class reg:
-    def __init__(
-        self,
-        df: pd.core.frame.DataFrame,
-        Xs: List,
-        growth_df: pd.core.frame.DataFrame,
-        year_start: int = 1975,
-        year_end: int = 2020,
-        des: str = None,
-        name: str = "output",
-        end_t: int = 10,
-        Ys: List = ["profits", "sale", "capital", "employment", "tfp"],
-        r2: bool = False,
-        include_fin_util: bool = False,
-        dont_scale_by_at: List = [],
-        ctrl_y: bool = False,
-        ctrl_lag_y: bool = False,
-        ctrl_laglag_y: bool = False,
-        std_X: bool = False,
-        fe: str = "industry",
-        report_stat: str = "tvalues",
-        report_stars: bool = True,
-        bdec: int = 3,
-        tdec: int = 2,
-        sdec: int = 3,
-    ):
-        self.df = df
-        self.Xs = Xs
-        self.year_start = year_start
-        self.year_end = year_end
-        self.des = Path(des)
-        self.name = name
-        self.end_t = end_t + 1
-        self.Ys = Ys
-        self.r2 = r2
-        self.include_fin_util = include_fin_util
-        self.dont_scale_by_at = dont_scale_by_at
-        self.ctrl_y = ctrl_y
-        self.ctrl_lag_y = ctrl_lag_y
-        self.ctrl_laglag_y = ctrl_laglag_y
-        self.std_X = std_X
-        self.fe = fe
-        self.report_stars = report_stars
-        self.report_stat = report_stat
-        self.bdec = bdec
-        self.tdec = tdec
-        self.sdec = sdec
+    df: pd.core.frame.DataFrame
+    Xs: List
+    growth_df: pd.core.frame.DataFrame
+    year_start: int = 1975
+    year_end: int = 2020
+    des: str = None
+    name: str = "output"
+    more_ctrl: List[str] = field(default_factory=list)
+    end_t: int = 11
+    Ys: List[str] = field(
+        default_factory=lambda: ["profits", "sale", "capital", "employment", "tfp"]
+    )
+    r2: bool = False
+    include_fin_util: bool = False
+    dont_scale_by_at: List[str] = field(default_factory=list)
+    ctrl_y: bool = False
+    ctrl_lag_y: bool = False
+    ctrl_laglag_y: bool = False
+    std_X: bool = False
+    fe: str = "industry"
+    wald: str = ""
+    wald_diff: str = ""
+    report_stat: str = "tvalues"
+    report_stars: bool = True
+    bdec: int = 3
+    tdec: int = 2
+    sdec: int = 3
 
-        growth = growth_df
+    def preprocess(self):
+        growth = self.growth_df
         assert (
             len(growth.groupby(["gvkey", "fyear"]).permno.count()[lambda s: s > 1]) == 0
         ), "not unique at gvkey,fyear"
@@ -169,6 +164,7 @@ class reg:
                 "capital",
                 "tfp",
                 "sig2",
+                "xrdat",
             ]
         ]
 
@@ -210,6 +206,7 @@ class reg:
         }
 
     def process_data(self):
+        self.preprocess()
         # Xs = ["xi"] + self.Xs
         Xs = self.Xs
         self.df = self.growth.merge(self.df, how="left")
@@ -243,7 +240,7 @@ class reg:
             self.df[c] = np.log(self.df[c]).fillna(0)
 
         self.df = self.df.groupby(["gvkey", "fyear"]).mean().reset_index()
-        debug(f"After de-dup at gvkey,fyear, the df.len is {len(self.df)}")
+        debug(f"After de-dup at gvkey, fyear, the df.len is {len(self.df)}")
 
         if self.ctrl_lag_y:
             debug("adding and controlling lagged Y")
@@ -288,9 +285,13 @@ class reg:
         for Y in self.Ys:
             self.df["theta_i_" + Y] = self.df[Y]
 
+        self.df = self.df.replace([np.inf, -np.inf], np.nan)
+
     def estimate(self):
         all_tables = []
         self.process_data()
+
+        logger.info("estimating with more controls {}".format(self.more_ctrl))
 
         _table_i, _table_j, b, stats = (
             latex(bdec=self.bdec, tdec=self.tdec, sdec=self.sdec),
@@ -308,6 +309,8 @@ class reg:
                 ctrl_y.append(f"{Y}l2")
             noobs = ["Obs."]
             r2s = ["$R^2 (\%)$"]
+            wald_test = ["Wald"]
+            wald_diff = [self.wald_diff] if self.wald_diff else ["Diff"]
             for X in self.Xs:
                 (
                     b[X],
@@ -322,20 +325,34 @@ class reg:
                 for time in range(1, self.end_t):
                     result.append(
                         p.submit(
-                            run_reg, self.df, Y, ctrl_y + self.Xs, time, "i", self.fe
+                            run_reg,
+                            self.df,
+                            Y,
+                            ctrl_y + self.Xs,
+                            self.more_ctrl,
+                            time,
+                            "i",
+                            self.fe,
                         )
                     )
                 for res in result:
-                    params, tstats, bse, nobs, r2 = res.result()
+                    model, res = res.result()
                     for X in self.Xs:
-                        b[X].append(params.loc[f"theta_i_{X}"])
+                        b[X].append(res.params.loc[f"theta_i_{X}"])
                         if self.report_stat == "tvalues":
-                            stats[X].append(tstats[f"theta_i_{X}"])
+                            stats[X].append(res.tstats[f"theta_i_{X}"])
                         elif self.report_stat == "bse":
-                            stats[X].append(bse[f"theta_i_{X}"])
+                            stats[X].append(res.std_errors[f"theta_i_{X}"])
 
-                    noobs.append(nobs)
-                    r2s.append(r2)
+                    noobs.append(res.nobs)
+                    r2s.append(res.rsquared * 100)
+                    if self.wald:
+                        wald = res.wald_test(formula=self.wald)
+                        v1, v2 = self.wald.split("=")
+                        wald_diff.append(
+                            str(round(res.params.loc[v1] - res.params.loc[v2],3))+star(wald.pval)
+                        )
+                        wald_test.append(str(round(wald.stat, 3)))
             _table_i.write_plain_row(
                 "\multicolumn{%d}{c}{\\textit{Panel %s. %s}}"
                 % (self.end_t * 2 - 2, panel, self.varname[Y])
@@ -349,12 +366,17 @@ class reg:
                 )
             if self.r2:
                 _table_i.collect_row(r2s, rounding=2)
+            if self.wald:
+                _table_i.write_empty_row()
+                _table_i.collect_row(wald_diff)
+                _table_i.collect_row(wald_test)
+
             _table_i.write_empty_row()
             _table_i.collect_row(noobs)
             _table_i.hline()
             _table_i.write_empty_row()
 
-        the_table = self.des / f"firm_growth_i_{self.year_start}_{self.name}.tex"
+        the_table = Path(self.des) / f"firm_growth_i_{self.year_start}_{self.name}.tex"
         self.table_name = the_table.as_posix()
         _table_i.rows = _table_i.rows[:-1]
         logger.info(f"writing table {self.table_name}")
@@ -456,6 +478,7 @@ class reg:
         N = 0
         fig, ax = plt.subplots(figsize=(8, 6))
         for v, co, t, color in zip(varname, coef, tstat, colors[: len(self.Xs)] * 10):
+            print(v)
             N += 1
             if not any(ex.lower() in v.lower() for ex in exclude):
                 self.plotter(ax, co, t, v, color, error_bars)
