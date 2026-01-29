@@ -4,7 +4,6 @@ import os
 import re
 import string
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import List
 import matplotlib.pyplot as plt
@@ -320,39 +319,33 @@ class reg:
                     [""],
                 )
 
-            with ProcessPoolExecutor(10) as p:
-                result = []
-                for time in range(1, self.end_t):
-                    result.append(
-                        p.submit(
-                            run_reg,
-                            self.df,
-                            Y,
-                            ctrl_y + self.Xs,
-                            self.more_ctrl,
-                            time,
-                            "i",
-                            self.fe,
-                        )
-                    )
-                for res in result:
-                    model, res = res.result()
-                    for X in self.Xs:
-                        b[X].append(res.params.loc[f"theta_i_{X}"])
-                        if self.report_stat == "tvalues":
-                            stats[X].append(res.tstats[f"theta_i_{X}"])
-                        elif self.report_stat == "bse":
-                            stats[X].append(res.std_errors[f"theta_i_{X}"])
+            for time in range(1, self.end_t):
+                model, res = run_reg(
+                    self.df,
+                    Y,
+                    ctrl_y + self.Xs,
+                    self.more_ctrl,
+                    time,
+                    "i",
+                    self.fe,
+                )
+                for X in self.Xs:
+                    b[X].append(res.params.loc[f"theta_i_{X}"])
+                    if self.report_stat == "tvalues":
+                        stats[X].append(res.tstats[f"theta_i_{X}"])
+                    elif self.report_stat == "bse":
+                        stats[X].append(res.std_errors[f"theta_i_{X}"])
 
-                    noobs.append(res.nobs)
-                    r2s.append(res.rsquared * 100)
-                    if self.wald:
-                        wald = res.wald_test(formula=self.wald)
-                        v1, v2 = self.wald.split("=")
-                        wald_diff.append(
-                            str(round(res.params.loc[v1] - res.params.loc[v2],3))+star(wald.pval)
-                        )
-                        wald_test.append(str(round(wald.stat, 3)))
+                noobs.append(res.nobs)
+                r2s.append(res.rsquared * 100)
+                if self.wald:
+                    wald = res.wald_test(formula=self.wald)
+                    v1, v2 = self.wald.split("=")
+                    wald_diff.append(
+                        str(round(res.params.loc[v1] - res.params.loc[v2], 3))
+                        + star(wald.pval)
+                    )
+                    wald_test.append(str(round(wald.stat, 3)))
             _table_i.write_plain_row(
                 "\multicolumn{%d}{c}{\\textit{Panel %s. %s}}"
                 % (self.end_t * 2 - 2, panel, self.varname[Y])
