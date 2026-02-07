@@ -5,20 +5,51 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "firm_growth"
 version = "0.1"
-description = ""
+description = "Financial research project on firm growth and innovation"
 authors = [
   { name = "Leo Liu", email = "leo.liu@unsw.edu.au" },
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.8"
+
+# Consolidated dependencies from your imports
 dependencies = [
-    "matplotlib",
-    "linearmodels",
-    "scipy",
     "pandas",
-    "icecream",
+    "polars[all]",
+    "pyarrow",
+    "pyreadstat",
+    "numpy",
+    "pandarallel",
+    "openpyxl",
+    "scikit-learn",
+    "scipy",
+    "statsmodels",
+    "linearmodels",
+    "joblib",
+    "matplotlib",
+    "seaborn",
+    "plotly",
+    "altair",
+    "altair_saver",
+    "hvplot",
+    "duckdb",
+    "clickhouse_driver",
+    "wrds",
+    "psycopg2-binary",
+    "connectorx",
+    "SQLAlchemy",
+    "pyspark",
+    "google-genai",
+    "requests",
     "loguru",
+    "icecream",
+    "tqdm",
+    "rapidfuzz",
+    "gensim",
+    "jupyter",
+    "jupyterlab",
+    "ipython",
 ]
 
 [tool.setuptools]
