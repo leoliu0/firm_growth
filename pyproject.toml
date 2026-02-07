@@ -15,7 +15,7 @@ requires-python = ">=3.8"
 
 # Consolidated dependencies from your imports
 dependencies = [
-    "pandas",
+    "pandas<3.0.0",
     "polars[all]",
     "pyarrow",
     "pyreadstat",
