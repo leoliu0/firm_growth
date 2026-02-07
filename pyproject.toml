@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "firm_growth"
-version = "0.1"
+version = "0.1.post1"
 description = "Financial research project on firm growth and innovation"
 authors = [
   { name = "Leo Liu", email = "leo.liu@unsw.edu.au" },
