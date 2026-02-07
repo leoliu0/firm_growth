@@ -18,7 +18,7 @@ from scipy.stats.mstats import winsorize
 
 import warnings
 
-from latex_table import latex
+from .latex_table import latex
 
 warnings.simplefilter("ignore")
 
@@ -307,7 +307,7 @@ class reg:
             if self.ctrl_laglag_y:
                 ctrl_y.append(f"{Y}l2")
             noobs = ["Obs."]
-            r2s = ["$R^2 (\%)$"]
+            r2s = [r"$R^2 (\%)$"]
             wald_test = ["Wald"]
             wald_diff = [self.wald_diff] if self.wald_diff else ["Diff"]
             for X in self.Xs:
@@ -347,7 +347,7 @@ class reg:
                     )
                     wald_test.append(str(round(wald.stat, 3)))
             _table_i.write_plain_row(
-                "\multicolumn{%d}{c}{\\textit{Panel %s. %s}}"
+                "\\multicolumn{%d}{c}{\\textit{Panel %s. %s}}"
                 % (self.end_t * 2 - 2, panel, self.varname[Y])
             )
             _table_i.hline()
